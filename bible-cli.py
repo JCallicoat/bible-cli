@@ -77,7 +77,7 @@ BOOKS = [
 
 
 def find_book(book):
-    book = book.title().replace(" ", "")
+    book = book.title().replace(" ", "").replace("Psalms", "Psalm")
     for b in BOOKS:
         if book in b.replace(" ", ""):
             return b
