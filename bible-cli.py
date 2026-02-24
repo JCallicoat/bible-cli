@@ -206,6 +206,13 @@ def print_search(translation, search, query, params):
             conn.close()
 
 
+def get_translations():
+    translations = []
+    for db in sorted(glob.glob("translations/*.db")):
+        translations.append(os.path.basename(db).replace("_bible.db", ""))
+    return translations
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Query a Bible translation SQLite database."
@@ -218,7 +225,7 @@ def main():
         "-t",
         "--translation",
         default="NRSVUE",
-        help="The translation code (e.g., NET, KJV). Default: NRSVUE. Use commas for multiple.",
+        help="The translation code (e.g., NET, KJV). Default: NRSVUE. Use commas for multiple. Use 'all' for all translations.",
     )
     parser.add_argument(
         "-s",
@@ -240,11 +247,15 @@ def main():
 
     if args.list:
         print("Available translations:\n")
-        for db in sorted(glob.glob("translations/*.db")):
-            print(os.path.basename(db).replace("_bible.db", ""))
+        print("\n".join(get_translations()))
         sys.exit(0)
 
-    for translation in args.translation.split(","):
+    if args.translation.lower() == "all":
+        translations = get_translations()
+    else:
+        translations = args.translation.split(",")
+
+    for translation in translations:
         if args.search:
             query, params = build_search_query(translation, f"%{args.search}%")
             print_search(translation, args.search, query, params)
