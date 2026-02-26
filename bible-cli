@@ -255,6 +255,10 @@ def main():
     else:
         translations = args.translation.split(",")
 
+    # handle en and em dashes
+    args.chapter_verse = args.chapter_verse.replace("\u2013", "-")
+    args.chapter_verse = args.chapter_verse.replace("\u2014", "-")
+
     for translation in translations:
         if args.search:
             query, params = build_search_query(translation, f"%{args.search}%")
