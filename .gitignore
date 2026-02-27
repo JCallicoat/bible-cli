@@ -1,3 +1,4 @@
-work
 work/**
 bible_cli/__pycache__/**
+bible_cli.egg-info/**
+build/**
