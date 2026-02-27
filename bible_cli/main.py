@@ -77,19 +77,15 @@ BOOKS = [
 ]
 
 
-def get_translations_dir():
-    return Path(__file__).parent / "translations"
-
-
-def get_db_path(translation):
-    return get_translations_dir() / f"{translation.upper()}_bible.db"
-
-
-def get_translations():
-    return sorted(
-        p.stem.replace("_bible", "")
-        for p in get_translations_dir().glob("*.db")
+def get_translations(conn):
+    cursor = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;"
     )
+    return [row[0].upper() for row in cursor.fetchall()]
+
+
+def get_db_path():
+    return Path(__file__).parent / "translations" / "bible.db"
 
 
 def find_book(book):
@@ -127,16 +123,8 @@ def build_verse_query(translation, book, chapter_verse):
     return (query, params)
 
 
-def print_verses(translation, book, chapter_verse, query, params):
-    db_path = get_db_path(translation)
-
-    if not db_path.exists():
-        print(f"Error: Database file not found at {db_path}", file=sys.stderr)
-        sys.exit(1)
-
-    conn = None
+def print_verses(conn, translation, book, chapter_verse, query, params):
     try:
-        conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
         cursor.execute(query, params)
         results = cursor.fetchall()
@@ -151,9 +139,6 @@ def print_verses(translation, book, chapter_verse, query, params):
 
     except sqlite3.Error as e:
         print(f"Database error: {e}", file=sys.stderr)
-    finally:
-        if conn:
-            conn.close()
 
 
 def build_search_query(translation, search):
@@ -162,16 +147,8 @@ def build_search_query(translation, search):
     return (query, [search])
 
 
-def print_search(translation, search, query, params):
-    db_path = get_db_path(translation)
-
-    if not db_path.exists():
-        print(f"Error: Database file not found at {db_path}", file=sys.stderr)
-        sys.exit(1)
-
-    conn = None
+def print_search(conn, translation, search, query, params):
     try:
-        conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
         cursor.execute(query, params)
         results = cursor.fetchall()
@@ -186,9 +163,6 @@ def print_search(translation, search, query, params):
         print()
     except sqlite3.Error as e:
         print(f"Database error: {e}", file=sys.stderr)
-    finally:
-        if conn:
-            conn.close()
 
 
 def main():
@@ -221,26 +195,37 @@ def main():
 
     args = parser.parse_args()
 
-    if args.list:
-        print("Available translations:\n")
-        print("\n".join(get_translations()))
-        sys.exit(0)
-
-    translations = (
-        get_translations()
-        if args.translation.lower() == "all"
-        else args.translation.split(",")
-    )
+    db_path = get_db_path()
+    if not db_path.exists():
+        print(f"Error: Database file not found at {db_path}", file=sys.stderr)
+        sys.exit(1)
 
     # handle en and em dashes in verse input
     args.chapter_verse = args.chapter_verse.replace("\u2013", "-").replace(
         "\u2014", "-"
     )
 
-    for translation in translations:
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+
+        if args.list:
+            print("Available translations:\n")
+            print("\n".join(get_translations(conn)))
+            sys.exit(0)
+
+        translations = (
+            get_translations(conn)
+            if args.translation.lower() == "all"
+            else args.translation.split(",")
+        )
+
         if args.search:
-            query, params = build_search_query(translation, f"%{args.search}%")
-            print_search(translation, args.search, query, params)
+            for translation in translations:
+                query, params = build_search_query(
+                    translation, f"%{args.search}%"
+                )
+                print_search(conn, translation, args.search, query, params)
         else:
             book = find_book(args.book)
             if book is None:
@@ -250,13 +235,20 @@ def main():
                 )
                 if close:
                     print(
-                        f"Did you mean: {', '.join(close)}?", file=sys.stderr
+                        f"Did you mean: {', '.join(close)}?",
+                        file=sys.stderr,
                     )
                 sys.exit(1)
-            query, params = build_verse_query(
-                translation, book, args.chapter_verse
-            )
-            print_verses(translation, book, args.chapter_verse, query, params)
+            for translation in translations:
+                query, params = build_verse_query(
+                    translation, book, args.chapter_verse
+                )
+                print_verses(
+                    conn, translation, book, args.chapter_verse, query, params
+                )
+    finally:
+        if conn:
+            conn.close()
 
 
 if __name__ == "__main__":
