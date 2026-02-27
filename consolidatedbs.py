@@ -14,25 +14,22 @@ def merge_databases():
         translation = db_path.stem.replace("_bible", "").lower()
         print(f"Merging {translation}...")
         conn.execute("ATTACH DATABASE ? AS src", (str(db_path),))
-        conn.execute(f"""
-            CREATE TABLE IF NOT EXISTS {translation} AS
-            SELECT * FROM src.{translation}
-        """)
+        conn.execute(f"DROP TABLE IF EXISTS {translation}")
+        conn.execute(
+            f"CREATE TABLE {translation} AS SELECT * FROM src.{translation}"
+        )
         conn.execute("DETACH DATABASE src")
 
         print(f"Indexing {translation}...")
-        conn.execute(f"""
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_{translation}_pk
-            ON {translation} (book_id, chapter, verse)
-        """)
-        conn.execute(f"""
-            CREATE INDEX IF NOT EXISTS idx_{translation}_book
-            ON {translation} (book)
-        """)
-        conn.execute(f"""
-            CREATE INDEX IF NOT EXISTS idx_{translation}_book_chapter
-            ON {translation} (book, chapter)
-        """)
+        conn.execute(
+            f"CREATE UNIQUE INDEX idx_{translation}_pk ON {translation} (book_id, chapter, verse)"
+        )
+        conn.execute(
+            f"CREATE INDEX idx_{translation}_book ON {translation} (book)"
+        )
+        conn.execute(
+            f"CREATE INDEX idx_{translation}_book_chapter ON {translation} (book, chapter)"
+        )
 
     conn.commit()
     conn.close()
