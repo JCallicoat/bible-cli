@@ -1,6 +1,7 @@
 #!/bin/env python3
 
 import argparse
+import difflib
 import sqlite3
 import sys
 
@@ -242,6 +243,16 @@ def main():
             print_search(translation, args.search, query, params)
         else:
             book = find_book(args.book)
+            if book is None:
+                print(f"Error: Unknown book '{args.book}'", file=sys.stderr)
+                close = difflib.get_close_matches(
+                    args.book.title(), BOOKS, n=3, cutoff=0.6
+                )
+                if close:
+                    print(
+                        f"Did you mean: {', '.join(close)}?", file=sys.stderr
+                    )
+                sys.exit(1)
             query, params = build_verse_query(
                 translation, book, args.chapter_verse
             )
