@@ -1,9 +1,7 @@
-#!/bin/env python
+#!/bin/env python3
 
 import argparse
 import sqlite3
-import glob
-import os
 import sys
 
 from pathlib import Path
@@ -78,9 +76,19 @@ BOOKS = [
 ]
 
 
+def get_translations_dir():
+    return Path(__file__).parent / "translations"
+
+
 def get_db_path(translation):
-    translations_dir = Path(__file__).parent / "translations"
-    return str(translations_dir / f"{translation.upper()}_bible.db")
+    return get_translations_dir() / f"{translation.upper()}_bible.db"
+
+
+def get_translations():
+    return sorted(
+        p.stem.replace("_bible", "")
+        for p in get_translations_dir().glob("*.db")
+    )
 
 
 def find_book(book):
@@ -92,13 +100,8 @@ def find_book(book):
 
 
 def build_verse_query(translation, book, chapter_verse):
-    # Build the query dynamically based on provided arguments
-    # We assume the table name is 'net' as per your schema description
-    query = f"SELECT verse, text FROM {translation.lower()} WHERE 1=1"
-    params = []
-
-    query += " AND book = ?"
-    params.append(book)
+    query = f"SELECT verse, text FROM {translation.lower()} WHERE book = ?"
+    params = [book]
 
     if chapter_verse:
         verses = None
@@ -114,34 +117,26 @@ def build_verse_query(translation, book, chapter_verse):
             if "-" in verses:
                 start, end = verses.split("-", 1)
                 query += " AND verse >= ? AND verse <= ?"
-                params.append(start)
-                params.append(end)
+                params.extend([start, end])
             else:
                 query += " AND verse = ?"
                 params.append(verses)
 
-    # Sort results to ensure they are printed in biblical order
     query += " ORDER BY book_id, chapter, verse;"
-
-    # print(query)
-    # print(params)
     return (query, params)
 
 
 def print_verses(translation, book, chapter_verse, query, params):
-
     db_path = get_db_path(translation)
 
-    if not os.path.exists(db_path):
-        print(f"Error: Database file not found at {db_path}")
+    if not db_path.exists():
+        print(f"Error: Database file not found at {db_path}", file=sys.stderr)
         sys.exit(1)
 
+    conn = None
     try:
-        # Connect to the database
         conn = sqlite3.connect(db_path)
-        # conn.set_trace_callback(print)
         cursor = conn.cursor()
-
         cursor.execute(query, params)
         results = cursor.fetchall()
 
@@ -154,43 +149,29 @@ def print_verses(translation, book, chapter_verse, query, params):
             print("No matching verses found.")
 
     except sqlite3.Error as e:
-        print(f"Database error: {e}")
+        print(f"Database error: {e}", file=sys.stderr)
     finally:
         if conn:
             conn.close()
 
 
 def build_search_query(translation, search):
-    # Build the query dynamically based on provided arguments
-    # We assume the table name is 'net' as per your schema description
-    query = f"SELECT book, chapter, verse, text FROM {translation.lower()} WHERE 1=1"
-    params = []
-
-    query += " AND text like ?"
-    params.append(search)
-
-    # Sort results to ensure they are printed in biblical order
+    query = f"SELECT book, chapter, verse, text FROM {translation.lower()} WHERE text LIKE ?"
     query += " ORDER BY book_id, chapter, verse;"
-
-    # print(query)
-    # print(params)
-    return (query, params)
+    return (query, [search])
 
 
 def print_search(translation, search, query, params):
-
     db_path = get_db_path(translation)
 
-    if not os.path.exists(db_path):
-        print(f"Error: Database file not found at {db_path}")
+    if not db_path.exists():
+        print(f"Error: Database file not found at {db_path}", file=sys.stderr)
         sys.exit(1)
 
+    conn = None
     try:
-        # Connect to the database
         conn = sqlite3.connect(db_path)
-        # conn.set_trace_callback(print)
         cursor = conn.cursor()
-
         cursor.execute(query, params)
         results = cursor.fetchall()
 
@@ -203,24 +184,16 @@ def print_search(translation, search, query, params):
 
         print()
     except sqlite3.Error as e:
-        print(f"Database error: {e}")
+        print(f"Database error: {e}", file=sys.stderr)
     finally:
         if conn:
             conn.close()
-
-
-def get_translations():
-    translations = []
-    for db in sorted(glob.glob("translations/*.db")):
-        translations.append(os.path.basename(db).replace("_bible.db", ""))
-    return translations
 
 
 def main():
     parser = argparse.ArgumentParser(
         description="Query a Bible translation SQLite database."
     )
-
     parser.add_argument(
         "-l", "--list", help="List available translations", action="store_true"
     )
@@ -235,7 +208,6 @@ def main():
         "--search",
         help="Search translations for words.",
     )
-
     parser.add_argument(
         "book", nargs="?", default="Genesis", help="The name of the book"
     )
@@ -253,14 +225,16 @@ def main():
         print("\n".join(get_translations()))
         sys.exit(0)
 
-    if args.translation.lower() == "all":
-        translations = get_translations()
-    else:
-        translations = args.translation.split(",")
+    translations = (
+        get_translations()
+        if args.translation.lower() == "all"
+        else args.translation.split(",")
+    )
 
-    # handle en and em dashes
-    args.chapter_verse = args.chapter_verse.replace("\u2013", "-")
-    args.chapter_verse = args.chapter_verse.replace("\u2014", "-")
+    # handle en and em dashes in verse input
+    args.chapter_verse = args.chapter_verse.replace("\u2013", "-").replace(
+        "\u2014", "-"
+    )
 
     for translation in translations:
         if args.search:
