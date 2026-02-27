@@ -6,6 +6,8 @@ import glob
 import os
 import sys
 
+from pathlib import Path
+
 BOOKS = [
     "Genesis",
     "Exodus",
@@ -76,6 +78,11 @@ BOOKS = [
 ]
 
 
+def get_db_path(translation):
+    translations_dir = Path(__file__).parent / "translations"
+    return str(translations_dir / f"{translation.upper()}_bible.db")
+
+
 def find_book(book):
     book = book.title().replace(" ", "").replace("Psalms", "Psalm")
     for b in BOOKS:
@@ -123,9 +130,7 @@ def build_verse_query(translation, book, chapter_verse):
 
 def print_verses(translation, book, chapter_verse, query, params):
 
-    # Construct the database path
-    db_name = f"{translation.upper()}_bible.db"
-    db_path = os.path.join("translations", db_name)
+    db_path = get_db_path(translation)
 
     if not os.path.exists(db_path):
         print(f"Error: Database file not found at {db_path}")
@@ -174,9 +179,7 @@ def build_search_query(translation, search):
 
 def print_search(translation, search, query, params):
 
-    # Construct the database path
-    db_name = f"{translation.upper()}_bible.db"
-    db_path = os.path.join("translations", db_name)
+    db_path = get_db_path(translation)
 
     if not os.path.exists(db_path):
         print(f"Error: Database file not found at {db_path}")
