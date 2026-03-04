@@ -1,5 +1,6 @@
 #!/bin/env python3
 
+import os
 import sqlite3
 from pathlib import Path
 
@@ -8,13 +9,14 @@ def merge_databases():
     translations_dir = Path(__file__).parent / "bible_cli" / "translations"
     output = translations_dir / "bible.db"
 
+    os.unlink(output)
     conn = sqlite3.connect(output)
 
     for db_path in sorted(translations_dir.glob("*_bible.db")):
         translation = db_path.stem.replace("_bible", "").lower()
         print(f"Merging {translation}...")
         conn.execute("ATTACH DATABASE ? AS src", (str(db_path),))
-        conn.execute(f"DROP TABLE IF EXISTS {translation}")
+        # conn.execute(f"DROP TABLE IF EXISTS {translation}")
         conn.execute(
             f"CREATE TABLE {translation} AS SELECT * FROM src.{translation}"
         )
