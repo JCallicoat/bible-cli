@@ -51,7 +51,7 @@ def get_translations():
 
 def main():
     for translation in get_translations():
-        with open(f"sword-mods/{translation}.vpl", "w") as fh:
+        with open(f"../sword-mods/{translation}.vpl", "w") as fh:
             fh.write(generate_vpl(translation))
 
 
