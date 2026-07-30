@@ -215,8 +215,11 @@ class BibleViewer(QMainWindow):
         )
         rows = cur.fetchall()
 
-        lines = [f"{row['verse']}. {row['text']}" for row in rows]
-        self.text_view.setPlainText("\n".join(lines))
+        lines = [
+            f"<b>{book} {chapter_text}:{row['verse']}</b> {row['text']}<br>"
+            for row in rows
+        ]
+        self.text_view.setHtml("\n".join(lines))
 
     def _on_search(self):
         table = self._current_table()
@@ -237,10 +240,10 @@ class BibleViewer(QMainWindow):
             return
 
         lines = [
-            f"{row['book']} {row['chapter']}:{row['verse']} {row['text']}"
+            f"<b>{row['book']} {row['chapter']}:{row['verse']}</b> {row['text'].replace(term, f'<b>{term}</b>')}<br>"
             for row in rows
         ]
-        self.text_view.setPlainText("\n".join(lines))
+        self.text_view.setHtml("\n".join(lines))
 
     # Matches: book [chapter[:start_verse[-end_verse]]]
     # "book" is a lazy free-form match so it can contain spaces or digits
@@ -353,10 +356,10 @@ class BibleViewer(QMainWindow):
             return
 
         lines = [
-            f"{row['book']} {row['chapter']}:{row['verse']} {row['text']}"
+            f"<b>{row['book']} {row['chapter']}:{row['verse']}</b> {row['text']}<br>"
             for row in rows
         ]
-        self.text_view.setPlainText("\n".join(lines))
+        self.text_view.setHtml("\n".join(lines))
 
     def closeEvent(self, event):
         self.conn.close()
