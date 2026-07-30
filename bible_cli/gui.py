@@ -46,6 +46,10 @@ def bold_term(term, text):
     )
 
 
+def get_icon_path():
+    return str(Path(__file__).parent / "resources" / "bible.png")
+
+
 def get_db_path():
     return Path(__file__).parent / "translations" / "bible.db"
 
@@ -240,6 +244,36 @@ class BibleViewer(QMainWindow):
         self._last_book = book
         self._last_chapter = str(chapter)
 
+    def _resolve_book(self, table: str, book_input: str):
+        """Resolve a possibly-abbreviated book name against table's books.
+
+        Matching compares book_input (lowercased, spaces stripped) as a
+        prefix against the DB's book field, normalized the same way, e.g.
+        "1cor" matches "1 Corinthians".
+
+        Returns (book, None) on a single unambiguous match, or
+        (None, error_message) if there's no match or more than one.
+        """
+        normalized_input = book_input.lower().replace(" ", "")
+        cur = self.conn.cursor()
+        cur.execute(
+            f"SELECT DISTINCT book, book_id FROM {quote_ident(table)} "
+            f"WHERE LOWER(REPLACE(book, ' ', '')) LIKE ? "
+            f"ORDER BY book_id",
+            (f"{normalized_input}%",),
+        )
+        matches = cur.fetchall()
+        distinct_books = list(dict.fromkeys(row["book"] for row in matches))
+
+        if not distinct_books:
+            return None, f"No book matches \u201c{book_input}\u201d."
+        if len(distinct_books) > 1:
+            return None, (
+                f"\u201c{book_input}\u201d is ambiguous, matches: "
+                + ", ".join(distinct_books)
+            )
+        return distinct_books[0], None
+
     def _current_table(self):
         return self.translation_combo.currentData()
 
@@ -311,22 +345,56 @@ class BibleViewer(QMainWindow):
         ]
         self.text_view.setHtml("\n".join(lines))
 
+    # Matches a "book:xxx" token anywhere in the search box, where xxx is
+    # a single non-whitespace chunk (e.g. "book:gen", "book:1cor").
+    _BOOK_FILTER_RE = re.compile(r"book:\s*(\S+)", re.IGNORECASE)
+
     def _on_search(self):
         table = self._current_table()
-        term = self.search_edit.text().strip()
-        if not table or not term:
+        raw_input = self.search_edit.text().strip()
+        if not table or not raw_input:
+            return
+
+        book = None
+        book_match = self._BOOK_FILTER_RE.search(raw_input)
+        if book_match:
+            book_input = book_match.group(1)
+            book, error = self._resolve_book(table, book_input)
+            if error:
+                self.text_view.setPlainText(error)
+                return
+            # Strip the "book:xxx" token out, leaving the actual search
+            # text (e.g. "book:gen garden" -> "garden").
+            term = self._BOOK_FILTER_RE.sub("", raw_input).strip()
+            term = re.sub(r"\s+", " ", term)
+        else:
+            term = raw_input
+
+        if not term:
+            self.text_view.setPlainText(
+                "Enter search text in addition to the book filter."
+            )
             return
 
         cur = self.conn.cursor()
-        cur.execute(
-            f"SELECT book, chapter, verse, text FROM {quote_ident(table)} "
-            f"WHERE text LIKE ? ORDER BY book_id, chapter, verse",
-            (f"%{term}%",),
-        )
+        if book:
+            cur.execute(
+                f"SELECT book, chapter, verse, text FROM {quote_ident(table)} "
+                f"WHERE text LIKE ? AND book = ? "
+                f"ORDER BY book_id, chapter, verse",
+                (f"%{term}%", book),
+            )
+        else:
+            cur.execute(
+                f"SELECT book, chapter, verse, text FROM {quote_ident(table)} "
+                f"WHERE text LIKE ? ORDER BY book_id, chapter, verse",
+                (f"%{term}%",),
+            )
         rows = cur.fetchall()
 
         if not rows:
-            self.text_view.setPlainText(f"No results for \u201c{term}\u201d.")
+            desc = f"\u201c{term}\u201d" + (f" in {book}" if book else "")
+            self.text_view.setPlainText(f"No results for {desc}.")
             return
 
         lines = [
@@ -387,35 +455,13 @@ class BibleViewer(QMainWindow):
             return
 
         book_input, chapter, start_verse, end_verse = parsed
-        normalized_input = book_input.lower().replace(" ", "")
+
+        book, error = self._resolve_book(table, book_input)
+        if error:
+            self.text_view.setPlainText(error)
+            return
 
         cur = self.conn.cursor()
-
-        # Book is matched by comparing the input (lowercased, spaces
-        # stripped) as a prefix against the DB's book field, similarly
-        # normalized, e.g. "1cor" matches "1 Corinthians".
-        cur.execute(
-            f"SELECT DISTINCT book, book_id FROM {quote_ident(table)} "
-            f"WHERE LOWER(REPLACE(book, ' ', '')) LIKE ? "
-            f"ORDER BY book_id",
-            (f"{normalized_input}%",),
-        )
-        matches = cur.fetchall()
-        distinct_books = list(dict.fromkeys(row["book"] for row in matches))
-
-        if not distinct_books:
-            self.text_view.setPlainText(
-                f"No book matches \u201c{book_input}\u201d."
-            )
-            return
-        if len(distinct_books) > 1:
-            self.text_view.setPlainText(
-                f"\u201c{book_input}\u201d is ambiguous, matches: "
-                + ", ".join(distinct_books)
-            )
-            return
-
-        book = distinct_books[0]
 
         # Point the dropdowns at this book/chapter now that it's resolved.
         # Runs whether this was triggered by a translation change or the
@@ -478,7 +524,7 @@ def main():
     app = QApplication(sys.argv)
     window = BibleViewer(db_path)
     icon = QIcon()
-    icon.addFile(str(Path(__file__).parent / "resources" / "bible.png"))
+    icon.addFile(get_icon_path())
     window.setWindowIcon(icon)
     window.show()
     window.reference_edit.setFocus()
