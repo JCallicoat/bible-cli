@@ -16,4 +16,4 @@ bible-gui = "bible_cli.gui:main"
 packages = ["bible_cli"]
 
 [tool.setuptools.package-data]
-bible_cli = ["translations/*.db"]
+bible_cli = ["translations/*.db", "resources/*.png"]

@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
 )
-from PySide6.QtGui import QAction, QFont
+from PySide6.QtGui import QAction, QIcon, QFont
 
 
 def quote_ident(name: str) -> str:
@@ -475,6 +475,9 @@ def main():
 
     app = QApplication(sys.argv)
     window = BibleViewer(db_path)
+    icon = QIcon()
+    icon.addFile(str(Path(__file__).parent / "resources" / "bible.png"))
+    window.setWindowIcon(icon)
     window.show()
     window.reference_edit.setFocus()
     sys.exit(app.exec())
