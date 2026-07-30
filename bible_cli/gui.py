@@ -51,6 +51,12 @@ class BibleViewer(QMainWindow):
         self.conn = sqlite3.connect(db_path)
         self.conn.row_factory = sqlite3.Row
 
+        # Tracks whatever book/chapter the dropdowns last pointed at (via
+        # manual selection or a resolved lookup), so a translation change
+        # can try to restore the same spot instead of resetting to book 1.
+        self._last_book: str | None = None
+        self._last_chapter: str | None = None
+
         self._build_menu()
         self._build_toolbar()
         self._build_central()
@@ -154,14 +160,27 @@ class BibleViewer(QMainWindow):
 
         self._on_translation_changed()
 
-    def _current_table(self):
-        return self.translation_combo.currentData()
+    def _select_combo_text(self, combo: QComboBox, text: str) -> bool:
+        """Silently select the item in combo matching text, if present.
 
-    def _on_translation_changed(self):
-        table = self._current_table()
-        if not table:
-            return
+        Does not emit currentIndexChanged, so this can be used to sync
+        dropdown state without triggering that combo's own data refresh.
+        Returns True if a matching item was found and selected.
+        """
+        idx = combo.findText(text)
+        if idx < 0:
+            return False
+        combo.blockSignals(True)
+        combo.setCurrentIndex(idx)
+        combo.blockSignals(False)
+        return True
 
+    def _populate_book_combo(self, table: str) -> list[str]:
+        """Fill book_combo with table's books, in canonical order.
+
+        Blocks signals, so this never triggers _on_book_changed on its
+        own -- callers decide what should happen after populating.
+        """
         cur = self.conn.cursor()
         # Preserve canonical book order via minimum book_id rather than
         # sorting alphabetically.
@@ -175,20 +194,14 @@ class BibleViewer(QMainWindow):
         self.book_combo.clear()
         self.book_combo.addItems(books)
         self.book_combo.blockSignals(False)
+        return books
 
-        if self.reference_edit.text().strip():
-            self._on_reference_lookup()
-        elif self.search_edit.text().strip():
-            self._on_search()
-        else:
-            self._on_book_changed()
+    def _populate_chapter_combo(self, table: str, book: str) -> list[str]:
+        """Fill chapter_combo with book's chapters in this table.
 
-    def _on_book_changed(self):
-        table = self._current_table()
-        book = self.book_combo.currentText()
-        if not table or not book:
-            return
-
+        Blocks signals, so this never triggers _on_chapter_changed on its
+        own -- callers decide what should happen after populating.
+        """
         cur = self.conn.cursor()
         cur.execute(
             f"SELECT DISTINCT chapter FROM {quote_ident(table)} "
@@ -201,7 +214,67 @@ class BibleViewer(QMainWindow):
         self.chapter_combo.clear()
         self.chapter_combo.addItems(chapters)
         self.chapter_combo.blockSignals(False)
+        return chapters
 
+    def _sync_combos_to_reference(self, table: str, book: str, chapter: int):
+        """Point the book/chapter dropdowns at a resolved reference.
+
+        Used after a successful lookup so the dropdowns reflect what's on
+        screen. Selection changes are made silently (no signals fired), so
+        this never re-triggers a display refresh -- the lookup itself is
+        already responsible for what's shown in text_view.
+        """
+        if not self._select_combo_text(self.book_combo, book):
+            return
+        self._populate_chapter_combo(table, book)
+        self._select_combo_text(self.chapter_combo, str(chapter))
+        self._last_book = book
+        self._last_chapter = str(chapter)
+
+    def _current_table(self):
+        return self.translation_combo.currentData()
+
+    def _on_translation_changed(self):
+        table = self._current_table()
+        if not table:
+            return
+
+        self._populate_book_combo(table)
+
+        has_lookup = bool(self.reference_edit.text().strip())
+        has_search = bool(self.search_edit.text().strip())
+
+        if not has_lookup and not has_search and self._last_book is not None:
+            # Try to stay on the same book (e.g. keep showing Exodus)
+            # after switching translations, instead of resetting to the
+            # first book.
+            self._select_combo_text(self.book_combo, self._last_book)
+
+        # Keep book/chapter mutually consistent up front. A lookup below
+        # may resolve to a different book and repopulate this again.
+        self._populate_chapter_combo(table, self.book_combo.currentText())
+
+        if (
+            not has_lookup
+            and not has_search
+            and self._last_chapter is not None
+        ):
+            self._select_combo_text(self.chapter_combo, self._last_chapter)
+
+        if has_lookup:
+            self._on_reference_lookup()
+        elif has_search:
+            self._on_search()
+        else:
+            self._on_chapter_changed()
+
+    def _on_book_changed(self):
+        table = self._current_table()
+        book = self.book_combo.currentText()
+        if not table or not book:
+            return
+
+        self._populate_chapter_combo(table, book)
         self._on_chapter_changed()
 
     def _on_chapter_changed(self):
@@ -211,6 +284,9 @@ class BibleViewer(QMainWindow):
         if not table or not book or not chapter_text:
             self.text_view.clear()
             return
+
+        self._last_book = book
+        self._last_chapter = chapter_text
 
         cur = self.conn.cursor()
         cur.execute(
@@ -244,8 +320,15 @@ class BibleViewer(QMainWindow):
             self.text_view.setPlainText(f"No results for \u201c{term}\u201d.")
             return
 
+        bold_term = re.sub(
+            re.escape(term),
+            lambda m: f"<b>{m.group(0)}</b>",
+            row["text"],
+            flags=re.IGNORECASE,
+        )
+
         lines = [
-            f"<b>{row['book']} {row['chapter']}:{row['verse']}</b> {row['text'].replace(term, f'<b>{term}</b>')}<br>"
+            f"<b>{row['book']} {row['chapter']}:{row['verse']}</b> {bold_term}<br>"
             for row in rows
         ]
         self.text_view.setHtml("\n".join(lines))
@@ -331,6 +414,12 @@ class BibleViewer(QMainWindow):
             return
 
         book = distinct_books[0]
+
+        # Point the dropdowns at this book/chapter now that it's resolved.
+        # Runs whether this was triggered by a translation change or the
+        # user pressing Enter directly in the Lookup box, so the dropdowns
+        # always reflect what's actually on screen.
+        self._sync_combos_to_reference(table, book, chapter)
 
         if start_verse is None:
             # No verse given at all: whole chapter.
