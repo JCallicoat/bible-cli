@@ -37,6 +37,15 @@ def quote_ident(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
+def bold_term(term, text):
+    return re.sub(
+        re.escape(term),
+        lambda m: f"<b>{m.group(0)}</b>",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+
 def get_db_path():
     return Path(__file__).parent / "translations" / "bible.db"
 
@@ -320,15 +329,8 @@ class BibleViewer(QMainWindow):
             self.text_view.setPlainText(f"No results for \u201c{term}\u201d.")
             return
 
-        bold_term = re.sub(
-            re.escape(term),
-            lambda m: f"<b>{m.group(0)}</b>",
-            row["text"],
-            flags=re.IGNORECASE,
-        )
-
         lines = [
-            f"<b>{row['book']} {row['chapter']}:{row['verse']}</b> {bold_term}<br>"
+            f"<b>{row['book']} {row['chapter']}:{row['verse']}</b> {bold_term(term, row['text'])}<br>"
             for row in rows
         ]
         self.text_view.setHtml("\n".join(lines))
