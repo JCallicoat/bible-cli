@@ -176,7 +176,12 @@ class BibleViewer(QMainWindow):
         self.book_combo.addItems(books)
         self.book_combo.blockSignals(False)
 
-        self._on_book_changed()
+        if self.reference_edit.text().strip():
+            self._on_reference_lookup()
+        elif self.search_edit.text().strip():
+            self._on_search()
+        else:
+            self._on_book_changed()
 
     def _on_book_changed(self):
         table = self._current_table()
