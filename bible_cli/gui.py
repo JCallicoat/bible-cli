@@ -14,7 +14,6 @@ Dependencies:
     pip install PySide6
 """
 
-import re
 import sys
 import sqlite3
 from pathlib import Path
@@ -31,19 +30,20 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QAction, QIcon, QFont
 
-
-def quote_ident(name: str) -> str:
-    """Safely quote a SQLite identifier (table/column name)."""
-    return '"' + name.replace('"', '""') + '"'
-
-
-def bold_term(term, text):
-    return re.sub(
-        re.escape(term),
-        lambda m: f"<b>{m.group(0)}</b>",
-        text,
-        flags=re.IGNORECASE,
-    )
+from .bible_common import (
+    DEFAULT_TRANSLATION,
+    bold_term,
+    extract_filters,
+    get_translations,
+    list_books,
+    list_chapters,
+    lookup_verses,
+    parse_reference,
+    resolve_book,
+    resolve_translation,
+    search_verses,
+    build_verse_query,
+)
 
 
 def get_icon_path():
@@ -115,7 +115,9 @@ class BibleViewer(QMainWindow):
         toolbar.addSeparator()
         toolbar.addWidget(QLabel(" Lookup: "))
         self.reference_edit = QLineEdit()
-        self.reference_edit.setPlaceholderText("e.g. 1cor 13:4-7")
+        self.reference_edit.setPlaceholderText(
+            "e.g. 1cor 13:4-7, or 1cor 1:1 t:all"
+        )
         self.reference_edit.setMinimumWidth(100)
         self.reference_edit.returnPressed.connect(self._on_reference_lookup)
         toolbar.addWidget(self.reference_edit)
@@ -123,7 +125,9 @@ class BibleViewer(QMainWindow):
         toolbar.addSeparator()
         toolbar.addWidget(QLabel(" Search: "))
         self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("Search verse text...")
+        self.search_edit.setPlaceholderText(
+            "Search verse text... e.g. love b:john t:all"
+        )
         self.search_edit.setMinimumWidth(100)
         self.search_edit.returnPressed.connect(self._on_search)
         toolbar.addWidget(self.search_edit)
@@ -138,21 +142,7 @@ class BibleViewer(QMainWindow):
     # ---------- data population ----------
 
     def _populate_translations(self):
-        cur = self.conn.cursor()
-        cur.execute(
-            "SELECT name FROM sqlite_master "
-            "WHERE type='table' AND name NOT LIKE 'sqlite_%' "
-            "ORDER BY name"
-        )
-        tables = [row["name"] for row in cur.fetchall()]
-
-        # Only keep tables that actually look like translation tables.
-        valid_tables = []
-        for t in tables:
-            cur.execute(f"PRAGMA table_info({quote_ident(t)})")
-            cols = {r["name"] for r in cur.fetchall()}
-            if {"book", "chapter", "verse", "text"}.issubset(cols):
-                valid_tables.append(t)
+        valid_tables = get_translations(self.conn)
 
         if not valid_tables:
             QMessageBox.critical(
@@ -167,7 +157,7 @@ class BibleViewer(QMainWindow):
         self.translation_combo.clear()
         for i, t in enumerate(valid_tables):
             self.translation_combo.addItem(t.upper(), userData=t)
-            if t == "nrsvue":
+            if t == DEFAULT_TRANSLATION:
                 self.translation_combo.setCurrentIndex(i)
         self.translation_combo.blockSignals(False)
 
@@ -194,14 +184,7 @@ class BibleViewer(QMainWindow):
         Blocks signals, so this never triggers _on_book_changed on its
         own -- callers decide what should happen after populating.
         """
-        cur = self.conn.cursor()
-        # Preserve canonical book order via minimum book_id rather than
-        # sorting alphabetically.
-        cur.execute(
-            f"SELECT book, MIN(book_id) AS ord FROM {quote_ident(table)} "
-            f"GROUP BY book ORDER BY ord"
-        )
-        books = [row["book"] for row in cur.fetchall()]
+        books = list_books(self.conn, table)
 
         self.book_combo.blockSignals(True)
         self.book_combo.clear()
@@ -215,13 +198,7 @@ class BibleViewer(QMainWindow):
         Blocks signals, so this never triggers _on_chapter_changed on its
         own -- callers decide what should happen after populating.
         """
-        cur = self.conn.cursor()
-        cur.execute(
-            f"SELECT DISTINCT chapter FROM {quote_ident(table)} "
-            f"WHERE book = ? ORDER BY chapter",
-            (book,),
-        )
-        chapters = [str(row["chapter"]) for row in cur.fetchall()]
+        chapters = list_chapters(self.conn, table, book)
 
         self.chapter_combo.blockSignals(True)
         self.chapter_combo.clear()
@@ -243,36 +220,6 @@ class BibleViewer(QMainWindow):
         self._select_combo_text(self.chapter_combo, str(chapter))
         self._last_book = book
         self._last_chapter = str(chapter)
-
-    def _resolve_book(self, table: str, book_input: str):
-        """Resolve a possibly-abbreviated book name against table's books.
-
-        Matching compares book_input (lowercased, spaces stripped) as a
-        prefix against the DB's book field, normalized the same way, e.g.
-        "1cor" matches "1 Corinthians".
-
-        Returns (book, None) on a single unambiguous match, or
-        (None, error_message) if there's no match or more than one.
-        """
-        normalized_input = book_input.lower().replace(" ", "")
-        cur = self.conn.cursor()
-        cur.execute(
-            f"SELECT DISTINCT book, book_id FROM {quote_ident(table)} "
-            f"WHERE LOWER(REPLACE(book, ' ', '')) LIKE ? "
-            f"ORDER BY book_id",
-            (f"{normalized_input}%",),
-        )
-        matches = cur.fetchall()
-        distinct_books = list(dict.fromkeys(row["book"] for row in matches))
-
-        if not distinct_books:
-            return None, f"No book matches \u201c{book_input}\u201d."
-        if len(distinct_books) > 1:
-            return None, (
-                f"\u201c{book_input}\u201d is ambiguous, matches: "
-                + ", ".join(distinct_books)
-            )
-        return distinct_books[0], None
 
     def _current_table(self):
         return self.translation_combo.currentData()
@@ -331,23 +278,18 @@ class BibleViewer(QMainWindow):
         self._last_book = book
         self._last_chapter = chapter_text
 
-        cur = self.conn.cursor()
-        cur.execute(
-            f"SELECT verse, text FROM {quote_ident(table)} "
-            f"WHERE book = ? AND chapter = ? ORDER BY verse",
-            (book, int(chapter_text)),
+        query, params = build_verse_query(
+            table, book, int(chapter_text), None, None
         )
+        cur = self.conn.cursor()
+        cur.execute(query, params)
         rows = cur.fetchall()
 
         lines = [
-            f"<b>{book} {chapter_text}:{row['verse']}</b> {row['text']}<br>"
+            f"<b>{book} {chapter_text}:{row[0]}</b> {row[1]}<br>"
             for row in rows
         ]
         self.text_view.setHtml("\n".join(lines))
-
-    # Matches a "book:xxx" token anywhere in the search box, where xxx is
-    # a single non-whitespace chunk (e.g. "book:gen", "book:1cor").
-    _BOOK_FILTER_RE = re.compile(r"book:\s*(\S+)", re.IGNORECASE)
 
     def _on_search(self):
         table = self._current_table()
@@ -355,91 +297,52 @@ class BibleViewer(QMainWindow):
         if not table or not raw_input:
             return
 
-        book = None
-        book_match = self._BOOK_FILTER_RE.search(raw_input)
-        if book_match:
-            book_input = book_match.group(1)
-            book, error = self._resolve_book(table, book_input)
+        filters = extract_filters(raw_input)
+        term = filters.remainder
+        if not term:
+            self.text_view.setPlainText(
+                "Enter search text in addition to the filter(s)."
+            )
+            return
+
+        if filters.translation_all:
+            tables = get_translations(self.conn)
+        elif filters.translation:
+            resolved, error = resolve_translation(
+                get_translations(self.conn), filters.translation
+            )
             if error:
                 self.text_view.setPlainText(error)
                 return
-            # Strip the "book:xxx" token out, leaving the actual search
-            # text (e.g. "book:gen garden" -> "garden").
-            term = self._BOOK_FILTER_RE.sub("", raw_input).strip()
-            term = re.sub(r"\s+", " ", term)
+            tables = [resolved]
         else:
-            term = raw_input
+            tables = [table]
 
-        if not term:
-            self.text_view.setPlainText(
-                "Enter search text in addition to the book filter."
-            )
-            return
-
-        cur = self.conn.cursor()
-        if book:
-            cur.execute(
-                f"SELECT book, chapter, verse, text FROM {quote_ident(table)} "
-                f"WHERE text LIKE ? AND book = ? "
-                f"ORDER BY book_id, chapter, verse",
-                (f"%{term}%", book),
-            )
-        else:
-            cur.execute(
-                f"SELECT book, chapter, verse, text FROM {quote_ident(table)} "
-                f"WHERE text LIKE ? ORDER BY book_id, chapter, verse",
-                (f"%{term}%",),
-            )
-        rows = cur.fetchall()
+        rows, errors = search_verses(self.conn, tables, term, filters.book)
 
         if not rows:
-            desc = f"\u201c{term}\u201d" + (f" in {book}" if book else "")
-            self.text_view.setPlainText(f"No results for {desc}.")
+            desc = f"\u201c{term}\u201d" + (
+                f" in {filters.book}" if filters.book else ""
+            )
+            self.text_view.setPlainText(
+                errors[0] if errors else f"No results for {desc}."
+            )
             return
 
-        lines = [
-            f"<b>{row['book']} {row['chapter']}:{row['verse']}</b> {bold_term(term, row['text'])}<br>"
-            for row in rows
-        ]
-        self.text_view.setHtml("\n".join(lines))
-
-    # Matches: book [chapter[:start_verse[-end_verse]]]
-    # "book" is a lazy free-form match so it can contain spaces or digits
-    # (e.g. "1cor", "song of solomon"); the trailing chapter/verse portion
-    # is only consumed if it looks like whitespace followed by digits.
-    _REFERENCE_RE = re.compile(
-        r"^\s*(?P<book>.+?)"
-        r"(?:\s+(?P<chapter>\d+)(?::(?P<start>\d+)(?:-(?P<end>\d+))?)?)?"
-        r"\s*$"
-    )
-
-    def _parse_reference(self, ref: str):
-        """Parse 'book [chapter[:start_verse[-end_verse]]]' into a tuple.
-
-        Missing chapter defaults to 1. Missing start_verse means "no verse
-        filter" (i.e. show the whole chapter) rather than defaulting to
-        verse 1. An explicit start_verse with no end_verse means just that
-        one verse. Returns None if ref does not match the expected shape.
-
-        Returns (book, chapter, start_verse, end_verse) where start_verse
-        and end_verse may be None to indicate "whole chapter".
-        """
-        match = self._REFERENCE_RE.match(ref)
-        if not match or not match.group("book"):
-            return None
-
-        book = match.group("book").strip()
-        chapter = int(match.group("chapter")) if match.group("chapter") else 1
-        start_verse = (
-            int(match.group("start")) if match.group("start") else None
-        )
-        if start_verse is None:
-            end_verse = None
-        else:
-            end_verse = (
-                int(match.group("end")) if match.group("end") else start_verse
+        multi = filters.translation_all
+        lines = []
+        last_trans = None
+        for i, row in enumerate(rows):
+            if last_trans != row.translation:
+                last_trans = row.translation
+                if i > 0:
+                    lines.append("<br>")
+            prefix = f"{row.translation.upper()} " if multi else ""
+            lines.append(
+                f"<b>{prefix}{row.book} {row.chapter}:{row.verse}</b> "
+                f"{bold_term(term, row.text)}<br>"
             )
-        return book, chapter, start_verse, end_verse
+        self.text_view.setHtml("\n".join(lines))
 
     def _on_reference_lookup(self):
         table = self._current_table()
@@ -447,60 +350,88 @@ class BibleViewer(QMainWindow):
         if not table or not raw_ref:
             return
 
-        parsed = self._parse_reference(raw_ref)
+        raw_ref = raw_ref.replace("\u2013", "-").replace("\u2014", "-")
+        filters = extract_filters(raw_ref)
+
+        parsed = parse_reference(filters.remainder)
         if not parsed:
             self.text_view.setPlainText(
                 f"Could not parse reference \u201c{raw_ref}\u201d."
             )
             return
 
-        book_input, chapter, start_verse, end_verse = parsed
+        book_input = filters.book or parsed.book
+        explicit_translation = None
 
-        book, error = self._resolve_book(table, book_input)
-        if error:
-            self.text_view.setPlainText(error)
-            return
-
-        cur = self.conn.cursor()
-
-        # Point the dropdowns at this book/chapter now that it's resolved.
-        # Runs whether this was triggered by a translation change or the
-        # user pressing Enter directly in the Lookup box, so the dropdowns
-        # always reflect what's actually on screen.
-        self._sync_combos_to_reference(table, book, chapter)
-
-        if start_verse is None:
-            # No verse given at all: whole chapter.
-            cur.execute(
-                f"SELECT book, chapter, verse, text FROM {quote_ident(table)} "
-                f"WHERE book = ? AND chapter = ? "
-                f"ORDER BY verse",
-                (book, chapter),
+        if filters.translation_all:
+            tables = get_translations(self.conn)
+        elif filters.translation:
+            resolved, error = resolve_translation(
+                get_translations(self.conn), filters.translation
             )
+            if error:
+                self.text_view.setPlainText(error)
+                return
+            explicit_translation = resolved
+            tables = [resolved]
         else:
-            # Single verse (end_verse == start_verse) or an explicit range.
-            cur.execute(
-                f"SELECT book, chapter, verse, text FROM {quote_ident(table)} "
-                f"WHERE book = ? AND chapter = ? AND verse BETWEEN ? AND ? "
-                f"ORDER BY verse",
-                (book, chapter, start_verse, end_verse),
+            tables = [table]
+
+        # For a single translation, resolve the book and sync the dropdowns
+        # up front (as before) so they reflect what's on screen even if the
+        # specific verse range below has no matches. "t:all" intentionally
+        # skips this -- per spec, none of the dropdowns update for that mode.
+        if not filters.translation_all:
+            resolved_book, error = resolve_book(
+                self.conn, tables[0], book_input
             )
-        rows = cur.fetchall()
+            if error:
+                self.text_view.setPlainText(error)
+                return
+            if explicit_translation:
+                self._select_combo_text(
+                    self.translation_combo, explicit_translation.upper()
+                )
+            self._sync_combos_to_reference(
+                tables[0], resolved_book, parsed.chapter
+            )
+            book_input = resolved_book
+
+        rows, errors = lookup_verses(
+            self.conn,
+            tables,
+            book_input,
+            parsed.chapter,
+            parsed.start_verse,
+            parsed.end_verse,
+        )
 
         if not rows:
-            if start_verse is None:
-                ref_desc = f"{book} {chapter}"
-            elif end_verse != start_verse:
-                ref_desc = f"{book} {chapter}:{start_verse}-{end_verse}"
+            if parsed.start_verse is None:
+                ref_desc = f"{book_input} {parsed.chapter}"
+            elif parsed.end_verse != parsed.start_verse:
+                ref_desc = f"{book_input} {parsed.chapter}:{parsed.start_verse}-{parsed.end_verse}"
             else:
-                ref_desc = f"{book} {chapter}:{start_verse}"
-            self.text_view.setPlainText(f"No verses found for {ref_desc}")
+                ref_desc = (
+                    f"{book_input} {parsed.chapter}:{parsed.start_verse}"
+                )
+            self.text_view.setPlainText(
+                errors[0] if errors else f"No verses found for {ref_desc}"
+            )
             return
 
-        lines = [
-            f"<b>{row['book']} {row['chapter']}:{row['verse']}</b> {row['text']}<br>"
-            for row in rows
-        ]
+        multi = filters.translation_all
+        lines = []
+        last_trans = None
+        for i, row in enumerate(rows):
+            if last_trans != row.translation:
+                last_trans = row.translation
+                if i > 0:
+                    lines.append("<br>")
+            prefix = f"{row.translation.upper()} " if multi else ""
+            lines.append(
+                f"<b>{prefix}{row.book} {row.chapter}:{row.verse}</b> {row.text}<br>"
+            )
         self.text_view.setHtml("\n".join(lines))
 
     def closeEvent(self, event):

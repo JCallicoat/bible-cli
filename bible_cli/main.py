@@ -5,164 +5,139 @@ import difflib
 import sqlite3
 import sys
 
-from pathlib import Path
-
-BOOKS = [
-    "Genesis",
-    "Exodus",
-    "Leviticus",
-    "Numbers",
-    "Deuteronomy",
-    "Joshua",
-    "Judges",
-    "Ruth",
-    "1 Samuel",
-    "2 Samuel",
-    "1 Kings",
-    "2 Kings",
-    "1 Chronicles",
-    "2 Chronicles",
-    "Ezra",
-    "Nehemiah",
-    "Esther",
-    "Job",
-    "Psalm",
-    "Proverbs",
-    "Ecclesiastes",
-    "Song Of Solomon",
-    "Isaiah",
-    "Jeremiah",
-    "Lamentations",
-    "Ezekiel",
-    "Daniel",
-    "Hosea",
-    "Joel",
-    "Amos",
-    "Obadiah",
-    "Jonah",
-    "Micah",
-    "Nahum",
-    "Habakkuk",
-    "Zephaniah",
-    "Haggai",
-    "Zechariah",
-    "Malachi",
-    "Matthew",
-    "Mark",
-    "Luke",
-    "John",
-    "Acts",
-    "Romans",
-    "1 Corinthians",
-    "2 Corinthians",
-    "Galatians",
-    "Ephesians",
-    "Philippians",
-    "Colossians",
-    "1 Thessalonians",
-    "2 Thessalonians",
-    "1 Timothy",
-    "2 Timothy",
-    "Titus",
-    "Philemon",
-    "Hebrews",
-    "James",
-    "1 Peter",
-    "2 Peter",
-    "1 John",
-    "2 John",
-    "3 John",
-    "Jude",
-    "Revelation",
-]
+from . import bible_common as bc
 
 
-def get_translations(conn):
-    cursor = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;"
+def resolve_translation_list(conn, requested: list[str]):
+    """Resolve a list of user-provided translation codes (from -t/--translation)
+    against the DB. Returns (tables, errors).
+    """
+    all_tables = bc.get_translations(conn)
+    tables = []
+    errors = []
+    for name in requested:
+        table, err = bc.resolve_translation(all_tables, name)
+        if err:
+            errors.append(err)
+        else:
+            tables.append(table)
+    return tables, errors
+
+
+def apply_filter_translations(
+    conn, base_tables: list[str], filters: bc.Filters
+):
+    """Let an embedded t:<name>/t:all filter override the base -t/--translation
+    selection. Returns (tables, error).
+    """
+    if filters.translation_all:
+        return bc.get_translations(conn), None
+    if filters.translation:
+        all_tables = bc.get_translations(conn)
+        table, err = bc.resolve_translation(all_tables, filters.translation)
+        if err:
+            return None, err
+        return [table], None
+    return base_tables, None
+
+
+def print_rows(rows, multi):
+    last_trans = None
+    for i, row in enumerate(rows):
+        if last_trans != row.translation:
+            last_trans = row.translation
+            if i > 0:
+                print()
+        prefix = f"{row.translation.upper()} " if multi else ""
+        print(f"{prefix}{row.book} {row.chapter}:{row.verse} {row.text}")
+
+
+def suggest_books(book_input):
+    close = difflib.get_close_matches(
+        book_input.title(), bc.BOOKS, n=3, cutoff=0.6
     )
-    return [row[0].upper() for row in cursor.fetchall()]
+    if close:
+        print(f"Did you mean: {', '.join(close)}?", file=sys.stderr)
 
 
-def get_db_path():
-    return Path(__file__).parent / "translations" / "bible.db"
+def run_lookup(conn, base_tables, raw_ref):
+    raw_ref = raw_ref.replace("\u2013", "-").replace("\u2014", "-")
+    filters = bc.extract_filters(raw_ref)
+
+    tables, err = apply_filter_translations(conn, base_tables, filters)
+    if err:
+        print(f"Error: {err}", file=sys.stderr)
+        sys.exit(1)
+
+    parsed = bc.parse_reference(filters.remainder)
+    if not parsed:
+        print(
+            f"Error: could not parse reference \u201c{raw_ref}\u201d",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    book_input = filters.book or parsed.book
+
+    rows, errors = bc.lookup_verses(
+        conn,
+        tables,
+        book_input,
+        parsed.chapter,
+        parsed.start_verse,
+        parsed.end_verse,
+    )
+
+    for e in errors:
+        print(f"Error: {e}", file=sys.stderr)
+
+    if not rows:
+        if errors:
+            suggest_books(book_input)
+            sys.exit(1)
+        print("No matching verses found.")
+        return
+
+    multi = len(tables) > 1
+    if not multi:
+        print(f"{tables[0].upper()}\n")
+    print_rows(rows, multi=multi)
 
 
-def find_book(book):
-    book = book.title().replace(" ", "").replace("Psalms", "Psalm")
-    for b in BOOKS:
-        if book in b.replace(" ", ""):
-            return b
-    return None
+def run_search(conn, base_tables, raw_search):
+    filters = bc.extract_filters(raw_search)
+    term = filters.remainder
+    if not term:
+        print(
+            "Error: no search text provided (only filters).", file=sys.stderr
+        )
+        sys.exit(1)
 
+    tables, err = apply_filter_translations(conn, base_tables, filters)
+    if err:
+        print(f"Error: {err}", file=sys.stderr)
+        sys.exit(1)
 
-def build_verse_query(translation, book, chapter_verse):
-    query = f"SELECT verse, text FROM {translation.lower()} WHERE book = ?"
-    params = [book]
+    rows, errors = bc.search_verses(conn, tables, term, filters.book)
 
-    if chapter_verse:
-        verses = None
-        chapter = chapter_verse
+    for e in errors:
+        print(f"Error: {e}", file=sys.stderr)
 
-        if ":" in chapter_verse:
-            chapter, verses = chapter_verse.split(":", 1)
+    multi = len(tables) > 1
+    header = f'Search results for "{term}"'
+    if filters.book:
+        header += f" in {filters.book}"
+    if not multi:
+        header += f" - {tables[0].upper()}"
+    print(f"{header}\n")
 
-        query += " AND chapter = ?"
-        params.append(chapter)
-
-        if verses:
-            if "-" in verses:
-                start, end = verses.split("-", 1)
-                query += " AND verse >= ? AND verse <= ?"
-                params.extend([start, end])
-            else:
-                query += " AND verse = ?"
-                params.append(verses)
-
-    query += " ORDER BY book_id, chapter, verse;"
-    return (query, params)
-
-
-def print_verses(conn, translation, book, chapter_verse, query, params):
-    try:
-        cursor = conn.cursor()
-        cursor.execute(query, params)
-        results = cursor.fetchall()
-
-        if results:
-            print(f"{book} {chapter_verse} - {translation.upper()}")
-            for row in results:
-                print(f"({row[0]}) {row[1]}")
-            print()
-        else:
-            print("No matching verses found.")
-
-    except sqlite3.Error as e:
-        print(f"Database error: {e}", file=sys.stderr)
-
-
-def build_search_query(translation, search):
-    query = f"SELECT book, chapter, verse, text FROM {translation.lower()} WHERE text LIKE ?"
-    query += " ORDER BY book_id, chapter, verse;"
-    return (query, [search])
-
-
-def print_search(conn, translation, search, query, params):
-    try:
-        cursor = conn.cursor()
-        cursor.execute(query, params)
-        results = cursor.fetchall()
-
-        if results:
-            print(f'Search results for "{search}" - {translation.upper()}')
-            for row in results:
-                print(f"{row[0]} {row[1]}:{row[2]} {row[3]}")
-        else:
-            print(f'No results for "{search}" - {translation.upper()}')
-
+    if not rows:
+        print("No results found.")
         print()
-    except sqlite3.Error as e:
-        print(f"Database error: {e}", file=sys.stderr)
+        return
+
+    print_rows(rows, multi=multi)
+    print()
 
 
 def main():
@@ -176,12 +151,16 @@ def main():
         "-t",
         "--translation",
         default="NRSVUE",
-        help="The translation code (e.g., NET, KJV). Default: NRSVUE. Use commas for multiple. Use 'all' for all translations.",
+        help="The translation code (e.g., NET, KJV). Default: NRSVUE. Use commas "
+        "for multiple. Use 'all' for all translations. Can be overridden by an "
+        "embedded t:<name> or t:all filter (see below).",
     )
     parser.add_argument(
         "-s",
         "--search",
-        help="Search translations for words.",
+        help="Search translations for words. Supports 'b:<book>' and "
+        "'t:<translation>' (or 't:all') filters anywhere in the text, e.g. "
+        '-s "faith b:romans t:kjv".',
     )
     parser.add_argument(
         "book", nargs="?", default="Genesis", help="The name of the book"
@@ -192,18 +171,19 @@ def main():
         default="1",
         help="The chapter and optionally verse in format 1, 1:1 or 1:1-3",
     )
+    parser.add_argument(
+        "filters",
+        nargs="*",
+        help="Optional t:<translation> filter (e.g. t:all, t:kjv) to refine "
+        "the lookup, e.g. '1cor 1:1 t:all'.",
+    )
 
     args = parser.parse_args()
 
-    db_path = get_db_path()
+    db_path = bc.get_db_path()
     if not db_path.exists():
         print(f"Error: Database file not found at {db_path}", file=sys.stderr)
         sys.exit(1)
-
-    # handle en and em dashes in verse input
-    args.chapter_verse = args.chapter_verse.replace("\u2013", "-").replace(
-        "\u2014", "-"
-    )
 
     conn = None
     try:
@@ -211,41 +191,27 @@ def main():
 
         if args.list:
             print("Available translations:\n")
-            print("\n".join(get_translations(conn)))
+            print("\n".join(t.upper() for t in bc.get_translations(conn)))
             sys.exit(0)
 
-        translations = (
-            get_translations(conn)
-            if args.translation.lower() == "all"
-            else args.translation.split(",")
-        )
+        if args.translation.strip().lower() == "all":
+            base_tables = bc.get_translations(conn)
+        else:
+            base_tables, errors = resolve_translation_list(
+                conn, args.translation.split(",")
+            )
+            if errors:
+                for e in errors:
+                    print(f"Error: {e}", file=sys.stderr)
+                sys.exit(1)
 
         if args.search:
-            for translation in translations:
-                query, params = build_search_query(
-                    translation, f"%{args.search}%"
-                )
-                print_search(conn, translation, args.search, query, params)
+            run_search(conn, base_tables, args.search)
         else:
-            book = find_book(args.book)
-            if book is None:
-                print(f"Error: Unknown book '{args.book}'", file=sys.stderr)
-                close = difflib.get_close_matches(
-                    args.book.title(), BOOKS, n=3, cutoff=0.6
-                )
-                if close:
-                    print(
-                        f"Did you mean: {', '.join(close)}?",
-                        file=sys.stderr,
-                    )
-                sys.exit(1)
-            for translation in translations:
-                query, params = build_verse_query(
-                    translation, book, args.chapter_verse
-                )
-                print_verses(
-                    conn, translation, book, args.chapter_verse, query, params
-                )
+            combined_ref = " ".join(
+                [args.book, args.chapter_verse, *args.filters]
+            )
+            run_lookup(conn, base_tables, combined_ref)
     finally:
         if conn:
             conn.close()
